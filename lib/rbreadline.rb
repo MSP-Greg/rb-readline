@@ -8,16 +8,21 @@
 #  Copyright (C) 2009 by Park Heesob phasis@gmail.com
 #
 
-require "rbreadline/version"
 
-class Integer
-  def ord; self; end
+unless Object.const_defined? :Integer
+  Integer = Fixnum
 end
+
+#class Integer
+#  def ord; self; end
+#end
 
 module RbReadline
   require 'etc'
-
-  RL_LIBRARY_VERSION = "5.2"
+  require 'io/console'
+  
+  RB_READLINE_VERSION  = "0.5.5"
+  RL_LIBRARY_VERSION   = "5.2"
   RL_READLINE_VERSION  = 0x0502
 
   EOF = "\xFF"
@@ -163,6 +168,19 @@ module RbReadline
   SF_REVERSE     = 0x01
   SF_FOUND    = 0x02
   SF_FAILED      = 0x04
+
+  STD_OUTPUT_HANDLE = -11
+  STD_INPUT_HANDLE  = -10
+  KEY_EVENT = 1
+  VK_SHIFT = 0x10
+  VK_MENU = 0x12
+  VK_LMENU = 0xA4
+  VK_RMENU = 0xA5
+
+  LEFT_CTRL_PRESSED         = 0x0008
+  RIGHT_CTRL_PRESSED        = 0x0004
+  LEFT_ALT_PRESSED          = 0x0002
+  RIGHT_ALT_PRESSED         = 0x0001
 
   @slashify_in_quotes = "\\`\"$"
 
@@ -610,8 +628,6 @@ module RbReadline
 
   @rl_readline_name = "other"
 
-  @rl_getc_function = :rl_getc
-
   # Non-zero tells rl_delete_text and rl_insert_text to not add to
   #   the undo list.
   @_rl_doing_an_undo = false
@@ -691,9 +707,6 @@ module RbReadline
 
   # The last function executed by readline.
   @rl_last_func = nil
-
-  # Top level environment for readline_internal ().
-  @readline_top_level = nil
 
   # The streams we interact with.
   @_rl_in_stream = nil
@@ -1083,7 +1096,6 @@ module RbReadline
   @if_stack = []
   @if_stack_depth = 0
 
-
   # The last key bindings file read.
   @last_readline_init_file = nil
 
@@ -1103,6 +1115,84 @@ module RbReadline
   @users_dirname = nil
   @filename_len = 0
 
+  begin
+    # Cygwin will look like Windows, but we want to treat it like a Posix OS:
+    raise LoadError, "Cygwin is a Posix OS." if RUBY_PLATFORM =~ /\bcygwin\b/i
+    raise LoadError, "Not Windows" if RUBY_PLATFORM !~ /mswin|mingw/
+
+    if RUBY_VERSION < '1.9.1'
+      require 'Win32API'
+    else
+      require 'fiddle'
+      class Win32API
+        DLL = {}
+        TYPEMAP = {"0" => Fiddle::TYPE_VOID, "S" => Fiddle::TYPE_VOIDP, "I" => Fiddle::TYPE_LONG}
+        CALL_TYPE_TO_ABI = {:stdcall => 1, :cdecl => 1, nil => 1} #Taken from Fiddle::Importer
+
+        def initialize(dllname, func, import, export = "0", calltype = :stdcall)
+          @proto = import.join.tr("VPpNnLlIi", "0SSI").chomp('0').split('')
+          handle = DLL[dllname] ||= Fiddle.dlopen(dllname)
+          @func = Fiddle::Function.new(handle[func], TYPEMAP.values_at(*@proto), CALL_TYPE_TO_ABI[calltype])
+        end
+
+        def call(*args)
+          args.each_with_index do |x, i|
+            args[i], = [x == 0 ? nil : x].pack("p").unpack("l!*") if @proto[i] == "S" && !x.is_a?(Fiddle::Pointer)
+            args[i], = [x].pack("I").unpack("i") if @proto[i] == "I"
+          end
+          @func.call(*args).to_i || 0
+        end
+
+        alias Call call
+      end
+    end
+  end
+
+  @getch = Win32API.new("msvcrt", "_getch", [], 'I')
+  @kbhit = Win32API.new("msvcrt", "_kbhit", [], 'I')
+  @GetStdHandle = Win32API.new("kernel32","GetStdHandle",['L'],'L')
+  @SetConsoleCursorPosition = Win32API.new("kernel32","SetConsoleCursorPosition",['L','L'],'L')
+  @GetConsoleScreenBufferInfo = Win32API.new("kernel32","GetConsoleScreenBufferInfo",['L','P'],'L')
+  @FillConsoleOutputCharacter = Win32API.new("kernel32","FillConsoleOutputCharacter",['L','L','L','L','P'],'L')
+  @ReadConsoleInput = Win32API.new( "kernel32", "ReadConsoleInput", ['L', 'P', 'L', 'P'], 'L' )
+  @MessageBeep = Win32API.new("user32","MessageBeep",['L'],'L')
+  @GetKeyboardState = Win32API.new("user32","GetKeyboardState",['P'],'L')
+  @GetKeyState = Win32API.new("user32","GetKeyState",['L'],'L')
+  @hConsoleHandle = @GetStdHandle.Call(STD_OUTPUT_HANDLE)
+  @hConsoleInput =  @GetStdHandle.Call(STD_INPUT_HANDLE)
+  @pending_count = 0
+  @pending_key = nil
+
+  if Object.const_defined?('Encoding') && Encoding.respond_to?('default_external')
+    @encoding = "X"      # ruby 1.9.x or greater
+    @encoding_name = Encoding.default_external
+  end
+
+  if RUBY_PLATFORM =~ /mswin|mingw/
+    begin
+      @encoding =
+        case `chcp`.scan(/\d+$/).first.to_i
+        when 936,949,950,51932,51936,50225 then "E"
+        when 932,50220,50221,20222         then "S"
+        when 65001                         then "U"
+        else                                    "N"
+        end
+    rescue
+      @encoding = "N"
+    end
+  else
+    @encoding =
+      case ENV["LANG"]
+      when /\.UTF-8/ then "U"
+      when /\.EUC/   then "E"
+      when /\.SHIFT/ then "S"
+      else                "N"
+      end
+  end
+  @rl_byte_oriented = @encoding == "N"
+
+  class << self
+
   attr_accessor :rl_attempted_completion_function,:rl_deprep_term_function,
     :rl_event_hook,:rl_attempted_completion_over,:rl_basic_quote_characters,
     :rl_basic_word_break_characters,:rl_completer_quote_characters,
@@ -1110,7 +1200,60 @@ module RbReadline
     :rl_filename_quote_characters,:rl_instream,:rl_library_version,:rl_outstream,
     :rl_readline_name,:history_length,:history_base,:rl_point
 
-  module_function
+  if RUBY_PLATFORM =~ /mswin|mingw/
+    def rl_getc(stream)
+      begin
+        STDOUT.winsize
+      rescue
+        return @rl_instream.getc || EOF
+      end
+
+      while (@kbhit.Call == 0)
+        # If there is no input, yield the processor for other threads
+        sleep(@_keyboard_input_timeout)
+      end
+      c = @getch.Call
+      alt = (@GetKeyState.call(VK_LMENU) & 0x80) != 0
+      if c==0 || c==0xE0
+        while (@kbhit.Call == 0)
+          # If there is no input, yield the processor for other threads
+          sleep(@_keyboard_input_timeout)
+        end
+        r = c.chr + @getch.Call.chr
+      else
+        r = c.chr
+      end
+      r = "\e" + r if alt
+      r
+    end
+
+    def rl_gather_tyi
+      chars_avail = @kbhit.Call
+      return 0 if(chars_avail<=0)
+      k = rl_getc(@rl_instream)
+      rl_stuff_char(k)
+      return 1
+    end
+  else
+    def rl_getc(stream)
+      begin
+        c = stream.read(1)
+      rescue Errno::EINTR
+        c = rl_getc(stream)
+      end
+      return c ? c : EOF
+    end
+
+    def rl_gather_tyi
+      result = select([@rl_instream],nil,nil,0.1)
+      return 0 if result.nil?
+      k = rl_getc(@rl_instream)
+      rl_stuff_char(k)
+      return 1
+    end
+  end
+
+#  module_function
 
   # Okay, now we write the entry_function for filename completion.  In the
   # general case.  Note that completion in the shell is a little different
@@ -1424,7 +1567,6 @@ module RbReadline
     return matches
   end
 
-
   # This is a NOOP until the rest of Vi-mode is working.
   def rl_vi_editing_mode(count, key)
     0
@@ -1462,7 +1604,6 @@ module RbReadline
     end
     0
   end
-
 
   # A function for simple tilde expansion.
   def rl_tilde_expand(ignore, key)
@@ -1506,7 +1647,7 @@ module RbReadline
 
   # Clean up the terminal and readline state after catching a signal, before
   #   resending it to the calling application.
-  def rl_cleanup_after_signal()
+  def rl_cleanup_after_signal
     _rl_clean_up_for_exit()
     if (@rl_deprep_term_function)
       send(@rl_deprep_term_function)
@@ -1515,7 +1656,7 @@ module RbReadline
     rl_clear_signals()
   end
 
-  def _rl_clean_up_for_exit()
+  def _rl_clean_up_for_exit
     if @readline_echoing_p
       _rl_move_vert(@_rl_vis_botlin)
       @_rl_vis_botlin = 0
@@ -1613,7 +1754,6 @@ module RbReadline
     @_rl_last_c_pos = dpos
   end
 
-
   # PWP: move the cursor up or down.
   def _rl_move_vert(to)
     if (@_rl_last_v_pos == to || to > @_rl_screenheight)
@@ -1645,7 +1785,7 @@ module RbReadline
   end
 
   # Clear any pending input pushed with rl_execute_next()
-  def rl_clear_pending_input()
+  def rl_clear_pending_input
     @rl_pending_input = 0
     rl_unsetstate(RL_STATE_INPUTPENDING)
     0
@@ -1655,13 +1795,13 @@ module RbReadline
     0
   end
 
-  def rl_clear_signals()
+  def rl_clear_signals
     if Signal.list['WINCH']
       trap "WINCH",@def_proc
     end
   end
 
-  def rl_set_signals()
+  def rl_set_signals
     if Signal.list['WINCH']
       @def_proc = trap "WINCH",Proc.new{rl_sigwinch_handler(0)}
     end
@@ -1749,7 +1889,6 @@ module RbReadline
     vlp = physchars
     return [ret,lp,lip,niflp,vlp]
   end
-
 
   #*
   #* Expand the prompt string into the various display components, if
@@ -1929,7 +2068,6 @@ module RbReadline
     rl_generic_bind(ISFUNC, keyseq, function, map)
   end
 
-
   # Bind key sequence KEYSEQ to DEFAULT_FUNC if KEYSEQ is unbound.  Right
   #   now, this is always used to attempt to bind the arrow keys, hence the
   #   check for rl_vi_movement_mode.
@@ -2070,16 +2208,15 @@ module RbReadline
   # If this system allows us to look at the values of the regular
   #   input editing characters, then bind them to their readline
   #   equivalents, iff the characters are not bound to keymaps.
-  def readline_default_bindings()
+  def readline_default_bindings
     if @_rl_bind_stty_chars
       rl_tty_set_default_bindings(@_rl_keymap)
     end
   end
 
-  def _rl_init_eightbit()
+  def _rl_init_eightbit
 
   end
-
 
   # Do key bindings from a file.  If FILENAME is NULL it defaults
   #   to the first non-null filename from this list:
@@ -2254,7 +2391,6 @@ module RbReadline
     #_rl_init_file_error("unknown parser directive")
     return 1
   end
-
 
   def rl_variable_bind(name,value)
     case name
@@ -2474,14 +2610,13 @@ module RbReadline
     0
   end
 
-
-  def _rl_enable_meta_key()
+  def _rl_enable_meta_key
     if(@term_has_meta && @_rl_term_mm)
       @_rl_out_stream.write(@_rl_term_mm)
     end
   end
 
-  def rl_set_keymap_from_edit_mode()
+  def rl_set_keymap_from_edit_mode
     if (@rl_editing_mode == @emacs_mode)
       @_rl_keymap = @emacs_standard_keymap
     elsif (@rl_editing_mode == @vi_mode)
@@ -2489,7 +2624,7 @@ module RbReadline
     end
   end
 
-  def rl_get_keymap_name_from_edit_mode()
+  def rl_get_keymap_name_from_edit_mode
     if (@rl_editing_mode == @emacs_mode)
       "emacs"
     elsif (@rl_editing_mode == @vi_mode)
@@ -2537,14 +2672,14 @@ module RbReadline
   # Try and bind the common arrow key prefixes after giving termcap and
   #   the inputrc file a chance to bind them and create `real' keymaps
   #   for the arrow key prefix.
-  def bind_arrow_keys()
+  def bind_arrow_keys
     bind_arrow_keys_internal(@emacs_standard_keymap)
     bind_arrow_keys_internal(@vi_movement_keymap)
     bind_arrow_keys_internal(@vi_insertion_keymap)
   end
 
   # Initialize the entire state of the world.
-  def readline_initialize_everything()
+  def readline_initialize_everything
     # Set up input and output if they are not already set up.
     @rl_instream ||= $stdin
 
@@ -2595,27 +2730,26 @@ module RbReadline
     @rl_completer_word_break_characters ||= @rl_basic_word_break_characters
   end
 
-  def _rl_init_line_state()
+  def _rl_init_line_state
     @rl_point = @rl_end = @rl_mark = 0
     @rl_line_buffer = ""
   end
 
   # Set the history pointer back to the last entry in the history.
-  def _rl_start_using_history()
+  def _rl_start_using_history
     using_history()
     @_rl_saved_line_for_history = nil
   end
-
 
   def cr_faster(new, cur)
     (new + 1) < (cur - new)
   end
 
   #* _rl_last_c_pos is an absolute cursor position in multibyte locales and a
-  #   buffer index in others.  This macro is used when deciding whether the
-  #   current cursor position is in the middle of a prompt string containing
-  #   invisible characters.
-  def prompt_ending_index()
+  #  buffer index in others.  This macro is used when deciding whether the
+  #  current cursor position is in the middle of a prompt string containing
+  #  invisible characters.
+  def prompt_ending_index
     if !@rl_byte_oriented
       @prompt_physical_chars
     else
@@ -2656,7 +2790,7 @@ module RbReadline
 
   # Return the history entry at the current position, as determined by
   #   history_offset.  If there is no entry there, return a NULL pointer.
-  def current_history()
+  def current_history
     return ((@history_offset == @history_length) || @the_history.nil?) ? nil : @the_history[@history_offset]
   end
 
@@ -3169,7 +3303,7 @@ module RbReadline
   end
 
   # Basic redisplay algorithm.
-  def rl_redisplay()
+  def rl_redisplay
     return if !@readline_echoing_p
 
     _rl_wrapped_multicolumn = 0
@@ -3474,7 +3608,7 @@ module RbReadline
         if (!@rl_byte_oriented)
           _rl_wrapped_multicolumn = 0
           if (@_rl_screenwidth < lpos + wc_width)
-            for i in lpos ... @_rl_screenwidth
+            for _i in lpos ... @_rl_screenwidth
               # The space will be removed in update_line()
               line[out,1] = ' '
               out += 1
@@ -3493,7 +3627,7 @@ module RbReadline
           end
           line[out,wc_bytes] = @rl_line_buffer[_in,wc_bytes]
           out += wc_bytes
-          for i in 0 ... wc_width
+          for _i in 0 ... wc_width
             lpos+=1
             if (lpos >= @_rl_screenwidth)
               @inv_lbreaks[newlines+=1] = out
@@ -3815,7 +3949,7 @@ module RbReadline
   end
 
   # Tell the update routines that we have moved onto a new (empty) line.
-  def rl_on_new_line()
+  def rl_on_new_line
     if (@visible_line)
       @visible_line[0,1] = 0.chr
     end
@@ -3828,7 +3962,7 @@ module RbReadline
     0
   end
 
-  def rl_reset_line_state()
+  def rl_reset_line_state
     rl_on_new_line()
 
     @rl_display_prompt = @rl_prompt ? @rl_prompt : ""
@@ -3841,7 +3975,7 @@ module RbReadline
   end
 
   # Initialize readline (and terminal if not already).
-  def rl_initialize()
+  def rl_initialize
     # If we have never been called before, initialize the
     #   terminal and data structures.
     if (!@rl_initialized)
@@ -3924,7 +4058,7 @@ module RbReadline
   #   prompt already displayed.  Code originally from the version of readline
   #   distributed with CLISP.  rl_expand_prompt must have already been called
   #   (explicitly or implicitly).  This still doesn't work exactly right.
-  def rl_on_new_line_with_prompt()
+  def rl_on_new_line_with_prompt
     # Initialize visible_line and invisible_line to ensure that they can hold
     #   the already-displayed prompt.
     prompt_size = @rl_prompt.length + 1
@@ -3979,8 +4113,8 @@ module RbReadline
     return 0
   end
 
-  def readline_internal_setup()
-    @_rl_in_stream = @rl_instream
+  def readline_internal_setup
+    @_rl_in_stream  = @rl_instream
     @_rl_out_stream = @rl_outstream
 
     if (@rl_startup_hook)
@@ -4014,14 +4148,14 @@ module RbReadline
   end
 
   # Create a default argument.
-  def _rl_reset_argument()
+  def _rl_reset_argument
     @rl_numeric_arg = @rl_arg_sign = 1
     @rl_explicit_arg = false
     @_rl_argcxt = 0
   end
 
   # Ring the terminal bell.
-  def rl_ding()
+  def rl_ding
     if @MessageBeep
       @MessageBeep.Call(0)
     elsif @readline_echoing_p
@@ -4298,7 +4432,7 @@ module RbReadline
   end
 
   # How to clear things from the "echo-area".
-  def rl_clear_message()
+  def rl_clear_message
     @rl_display_prompt = @rl_prompt
     if (@msg_saved_prompt)
       rl_restore_prompt()
@@ -4343,7 +4477,6 @@ module RbReadline
     rl_clear_message()
   end
 
-
   def _rl_isearch_cleanup(cxt, r)
     if (r >= 0)
       _rl_isearch_fini(cxt)
@@ -4360,7 +4493,7 @@ module RbReadline
   #   another key, and dispatch into that map.
   def _rl_dispatch(key, map)
     @_rl_dispatching_keymap = map
-    return _rl_dispatch_subseq(key, map, false)
+    _rl_dispatch_subseq(key, map, false)
   end
 
 
@@ -4414,183 +4547,34 @@ module RbReadline
     return 1
   end
 
-  begin
-    # Cygwin will look like Windows, but we want to treat it like a Posix OS:
-    raise LoadError, "Cygwin is a Posix OS." if RUBY_PLATFORM =~ /\bcygwin\b/i
-    raise LoadError, "Not Windows" if RUBY_PLATFORM !~ /mswin|mingw/
-
-    if RUBY_VERSION < '1.9.1'
-      require 'Win32API'
-    else
-      require 'fiddle'
-      class Win32API
-        DLL = {}
-        TYPEMAP = {"0" => Fiddle::TYPE_VOID, "S" => Fiddle::TYPE_VOIDP, "I" => Fiddle::TYPE_LONG}
-        CALL_TYPE_TO_ABI = {:stdcall => 1, :cdecl => 1, nil => 1} #Taken from Fiddle::Importer
-
-        def initialize(dllname, func, import, export = "0", calltype = :stdcall)
-          @proto = import.join.tr("VPpNnLlIi", "0SSI").chomp('0').split('')
-          handle = DLL[dllname] ||= Fiddle.dlopen(dllname)
-          @func = Fiddle::Function.new(handle[func], TYPEMAP.values_at(*@proto), CALL_TYPE_TO_ABI[calltype])
-        end
-
-        def call(*args)
-          args.each_with_index do |x, i|
-            args[i], = [x == 0 ? nil : x].pack("p").unpack("l!*") if @proto[i] == "S" && !x.is_a?(Fiddle::Pointer)
-            args[i], = [x].pack("I").unpack("i") if @proto[i] == "I"
-          end
-          @func.call(*args).to_i || 0
-        end
-
-        alias Call call
-      end
-    end
-
-    STD_OUTPUT_HANDLE = -11
-    STD_INPUT_HANDLE  = -10
-    KEY_EVENT = 1
-    VK_SHIFT = 0x10
-    VK_MENU = 0x12
-    VK_LMENU = 0xA4
-    VK_RMENU = 0xA5
-
-    LEFT_CTRL_PRESSED         = 0x0008
-    RIGHT_CTRL_PRESSED        = 0x0004
-    LEFT_ALT_PRESSED          = 0x0002
-    RIGHT_ALT_PRESSED         = 0x0001
-
-    @getch = Win32API.new("msvcrt", "_getch", [], 'I')
-    @kbhit = Win32API.new("msvcrt", "_kbhit", [], 'I')
-    @GetStdHandle = Win32API.new("kernel32","GetStdHandle",['L'],'L')
-    @SetConsoleCursorPosition = Win32API.new("kernel32","SetConsoleCursorPosition",['L','L'],'L')
-    @GetConsoleScreenBufferInfo = Win32API.new("kernel32","GetConsoleScreenBufferInfo",['L','P'],'L')
-    @FillConsoleOutputCharacter = Win32API.new("kernel32","FillConsoleOutputCharacter",['L','L','L','L','P'],'L')
-    @ReadConsoleInput = Win32API.new( "kernel32", "ReadConsoleInput", ['L', 'P', 'L', 'P'], 'L' )
-    @MessageBeep = Win32API.new("user32","MessageBeep",['L'],'L')
-    @GetKeyboardState = Win32API.new("user32","GetKeyboardState",['P'],'L')
-    @GetKeyState = Win32API.new("user32","GetKeyState",['L'],'L')
-    @hConsoleHandle = @GetStdHandle.Call(STD_OUTPUT_HANDLE)
-    @hConsoleInput =  @GetStdHandle.Call(STD_INPUT_HANDLE)
-    @pending_count = 0
-    @pending_key = nil
-
-    begin
-      case `chcp`.scan(/\d+$/).first.to_i
-      when 936,949,950,51932,51936,50225
-        @encoding = "E"
-      when 932,50220,50221,20222
-        @encoding = "S"
-      when 65001
-        @encoding = "U"
-      else
-        @encoding = "N"
-      end
-    rescue
-      @encoding = "N"
-    end
-
-    def rl_getc(stream)
-      while (@kbhit.Call == 0)
-        # If there is no input, yield the processor for other threads
-        sleep(@_keyboard_input_timeout)
-      end
-      c = @getch.Call
-      alt = (@GetKeyState.call(VK_LMENU) & 0x80) != 0
-      if c==0 || c==0xE0
-        while (@kbhit.Call == 0)
-          # If there is no input, yield the processor for other threads
-          sleep(@_keyboard_input_timeout)
-        end
-        r = c.chr + @getch.Call.chr
-      else
-        r = c.chr
-      end
-      r = "\e"+r if alt
-      r
-    end
-
-    def rl_gather_tyi()
-      chars_avail = @kbhit.Call
-      return 0 if(chars_avail<=0)
-      k = send(@rl_getc_function,@rl_instream)
-      rl_stuff_char(k)
-      return 1
-    end
-
-  rescue LoadError                  # If we're not on Windows try...
-
-    if ENV["LANG"] =~ /\.UTF-8/
-      @encoding = "U"
-    elsif ENV["LANG"] =~ /\.EUC/
-      @encoding = "E"
-    elsif ENV["LANG"] =~ /\.SHIFT/
-      @encoding = "S"
-    else
-      @encoding = "N"
-    end
-
-    def rl_getc(stream)
-      begin
-        c = stream.read(1)
-      rescue Errno::EINTR
-        c = rl_getc(stream)
-      end
-      return c ? c : EOF
-    end
-
-    def rl_gather_tyi()
-      result = select([@rl_instream],nil,nil,0.1)
-      return 0 if result.nil?
-      k = send(@rl_getc_function,@rl_instream)
-      rl_stuff_char(k)
-      return 1
-    end
-  end
-
-  if (Object.const_defined?('Encoding') and Encoding.respond_to?('default_external'))
-    @encoding = "X"      # ruby 1.9.x or greater
-    @encoding_name = Encoding.default_external
-  end
-
-  @rl_byte_oriented = @encoding == "N"
-
   # Read a key, including pending input.
-  def rl_read_key()
-    @rl_key_sequence_length+=1
+  def rl_read_key
+    @rl_key_sequence_length += 1
 
-    if (@rl_pending_input!=0)
+    if @rl_pending_input != 0
       c = @rl_pending_input
       rl_clear_pending_input()
-    else
+    elsif @rl_event_hook
       # If the user has an event function, then call it periodically.
-      if (@rl_event_hook)
-        while (@rl_event_hook && (c=rl_get_char()).nil?)
+      while @rl_event_hook && (c=rl_get_char()).nil?
+        send(@rl_event_hook)
+        return "\n" if (@rl_done)     # XXX - experimental
 
-          send(@rl_event_hook)
-          if (@rl_done)     # XXX - experimental
-            return ("\n")
-          end
-          if (rl_gather_tyi() < 0)   # XXX - EIO
-            @rl_done = true
-            return ("\n")
-          end
-        end
-
-      else
-
-        if (c=rl_get_char()).nil?
-          c = send(@rl_getc_function,@rl_instream)
+        if (rl_gather_tyi() < 0)   # XXX - EIO
+          @rl_done = true
+          return "\n"
         end
       end
+    elsif (c = rl_get_char()).nil?
+      c = rl_getc(@rl_instream)
     end
-
-    return (c)
+    c
   end
 
 
   # Return the amount of space available in the buffer for stuffing
   #   characters.
-  def ibuffer_space()
+  def ibuffer_space
     if (@pop_index > @push_index)
       return (@pop_index - @push_index - 1)
     else
@@ -4601,7 +4585,7 @@ module RbReadline
   # Get a key from the buffer of characters to be read.
   #   Return the key in KEY.
   #   Result is KEY if there was a key, or 0 if there wasn't.
-  def rl_get_char()
+  def rl_get_char
     if (@push_index == @pop_index)
       return nil
     end
@@ -4669,7 +4653,7 @@ module RbReadline
     @_rl_last_c_pos += count
   end
 
-  def _rl_clear_screen()
+  def _rl_clear_screen
     if (@_rl_term_clrpag)
       @rl_outstream.write(@_rl_term_clrpag)
     else
@@ -4688,7 +4672,7 @@ module RbReadline
   end
 
   # Move to the start of the next line.
-  def rl_crlf()
+  def rl_crlf
     if (@_rl_term_cr)
       @_rl_out_stream.write(@_rl_term_cr)
     end
@@ -4697,21 +4681,21 @@ module RbReadline
   end
 
   # Move to the start of the current line.
-  def cr()
+  def cr
     if (@_rl_term_cr)
       @_rl_out_stream.write(@_rl_term_cr)
       @_rl_last_c_pos = 0
     end
   end
 
-  def _rl_erase_entire_line()
+  def _rl_erase_entire_line
     cr()
     _rl_clear_to_eol(0)
     cr()
     @rl_outstream.flush
   end
 
-  def _rl_internal_char_cleanup()
+  def _rl_internal_char_cleanup
     # In vi mode, when you exit insert mode, the cursor moves back
     #   over the previous character.  We explicitly check for that here.
     if (@rl_editing_mode == @vi_mode && @_rl_keymap == @vi_movement_keymap)
@@ -4737,7 +4721,7 @@ module RbReadline
     end
   end
 
-  def readline_internal_charloop()
+  def readline_internal_charloop
     lastc = -1
     eof_found = false
 
@@ -4754,7 +4738,9 @@ module RbReadline
       end
 
       rl_setstate(RL_STATE_READCMD)
+#STDERR.puts "\nreadline_internal_charloop"
       c = rl_read_key()
+#STDERR.puts "\nrl_read_key return #{c.class}"
       rl_unsetstate(RL_STATE_READCMD)
       # look at input.c:rl_getc() for the circumstances under which this will
       #be returned; punt immediately on read error without converting it to
@@ -4793,7 +4779,7 @@ module RbReadline
   end
 
   # How to abort things.
-  def _rl_abort_internal()
+  def _rl_abort_internal
     rl_ding()
     rl_clear_message()
     _rl_reset_argument()
@@ -4812,7 +4798,7 @@ module RbReadline
     _rl_abort_internal()
   end
 
-  def rl_vi_check()
+  def rl_vi_check
     if (@rl_point!=0 && @rl_point == @rl_end)
       @rl_point-=1
     end
@@ -4848,7 +4834,7 @@ module RbReadline
   # Read a line of input from the global rl_instream, doing output on
   #   the global rl_outstream.
   #   If rl_prompt is non-null, then that is our prompt.
-  def readline_internal()
+  def readline_internal
     readline_internal_setup()
     eof = readline_internal_charloop()
     readline_internal_teardown(eof)
@@ -4864,15 +4850,15 @@ module RbReadline
     end
 
     rl_set_prompt(prompt)
-
     rl_initialize()
     @readline_echoing_p = true
     if (@rl_prep_term_function)
       send(@rl_prep_term_function,@_rl_meta_flag)
     end
     rl_set_signals()
-
-    value = readline_internal()
+    readline_internal_setup()
+    eof = readline_internal_charloop()
+    value = readline_internal_teardown(eof)
     if(@rl_deprep_term_function)
       send(@rl_deprep_term_function)
     end
@@ -5006,20 +4992,20 @@ module RbReadline
   end
 
   # Begin a group.  Subsequent undos are undone as an atomic operation.
-  def rl_begin_undo_group()
+  def rl_begin_undo_group
     rl_add_undo(UNDO_BEGIN, 0, 0, nil)
     @_rl_undo_group_level+=1
     0
   end
 
   # End an undo group started with rl_begin_undo_group ().
-  def rl_end_undo_group()
+  def rl_end_undo_group
     rl_add_undo(UNDO_END, 0, 0, nil)
     @_rl_undo_group_level-=1
     0
   end
 
-  def rl_free_undo_list()
+  def rl_free_undo_list
     replace_history_data(-1, @rl_undo_list, nil)
     @rl_undo_list = nil
   end
@@ -5314,7 +5300,7 @@ module RbReadline
 
   # return the `current display line' of the cursor -- the number of lines to
   #   move up to get to the first screen line of the current readline line.
-  def _rl_current_display_line()
+  def _rl_current_display_line
     # Find out whether or not there might be invisible characters in the
     #   editing buffer.
     if (@rl_display_prompt == @rl_prompt)
@@ -5333,7 +5319,7 @@ module RbReadline
   end
 
   # Actually update the display, period.
-  def rl_forced_update_display()
+  def rl_forced_update_display
     if (@visible_line)
       @visible_line.gsub!(/[^\x00]/,0.chr)
     end
@@ -5375,7 +5361,7 @@ module RbReadline
   end
 
   # Restore the _rl_saved_line_for_history if there is one.
-  def rl_maybe_unsave_line()
+  def rl_maybe_unsave_line
     if (@_rl_saved_line_for_history)
       # Can't call with `1' because rl_undo_list might point to an undo
       # list from a history entry, as in rl_replace_from_history() below.
@@ -5390,7 +5376,7 @@ module RbReadline
   end
 
   # Save the current line in _rl_saved_line_for_history.
-  def rl_maybe_save_line()
+  def rl_maybe_save_line
     if @_rl_saved_line_for_history.nil?
       @_rl_saved_line_for_history = Struct.new(:line,:timestamp,:data).new
       @_rl_saved_line_for_history.line = @rl_line_buffer.dup
@@ -5402,14 +5388,14 @@ module RbReadline
 
   # Returns the magic number which says what history element we are
   #   looking at now.  In this implementation, it returns history_offset.
-  def where_history()
+  def where_history
     @history_offset
   end
 
   # Make the history entry at WHICH have LINE and DATA.  This returns
   #   the old entry so you can dispose of the data.  In the case of an
   #   invalid WHICH, a NULL pointer is returned.
-  def replace_history_entry (which, line, data)
+  def replace_history_entry(which, line, data)
     if (which < 0 || which >= @history_length)
       return nil
     end
@@ -5423,7 +5409,7 @@ module RbReadline
   end
 
   # Perhaps put back the current line if it has changed.
-  def rl_maybe_replace_line()
+  def rl_maybe_replace_line
     temp = current_history()
     # If the current line has changed, save the changes.
     if (temp && temp.data != @rl_undo_list)
@@ -5435,14 +5421,14 @@ module RbReadline
   # Back up history_offset to the previous history entry, and return
   #   a pointer to that entry.  If there is no previous entry then return
   #   a NULL pointer.
-  def previous_history()
+  def previous_history
     @history_offset!=0 ? @the_history[@history_offset-=1] : nil
   end
 
   # Move history_offset forward to the next history entry, and return
   #   a pointer to that entry.  If there is no next entry then return a
   #   NULL pointer.
-  def next_history()
+  def next_history
     (@history_offset == @history_length) ? nil : @the_history[@history_offset+=1]
   end
 
@@ -5492,7 +5478,7 @@ module RbReadline
     0
   end
 
-  def _rl_history_set_point ()
+  def _rl_history_set_point
     @rl_point = (@_rl_history_preserve_point && @_rl_history_saved_point != -1) ?
       @_rl_history_saved_point : @rl_end
     if (@rl_point > @rl_end)
@@ -5558,7 +5544,7 @@ module RbReadline
     0
   end
 
-  def _rl_any_typein()
+  def _rl_any_typein
     return (@push_index != @pop_index)
   end
 
@@ -5584,7 +5570,6 @@ module RbReadline
 
     if @rl_byte_oriented
       incoming << c
-      incoming_length = 1
     else
       @pending_bytes << c
       if _rl_get_char_len(@pending_bytes) == -2
@@ -5592,7 +5577,6 @@ module RbReadline
       else
         incoming = @pending_bytes
         @pending_bytes = ''
-        incoming_length = incoming.length
       end
     end
 
@@ -5689,7 +5673,7 @@ module RbReadline
     @vi_insert_buffer = @rl_line_buffer[start,len-1]
   end
 
-  def _rl_vi_done_inserting()
+  def _rl_vi_done_inserting
     if (@_rl_vi_doing_insert)
 
       # The `C', `s', and `S' commands set this.
@@ -5722,14 +5706,14 @@ module RbReadline
     return @vi_textmod[c]
   end
 
-  def _rl_vi_reset_last()
+  def _rl_vi_reset_last
     @_rl_vi_last_command = 'i'
     @_rl_vi_last_repeat = 1
     @_rl_vi_last_arg_sign = 1
     @_rl_vi_last_motion = 0
   end
 
-  def _rl_update_final()
+  def _rl_update_final
     full_lines = false
     # If the cursor is the only thing on an otherwise-blank last line,
     #   compensate so we don't print an extra CRLF.
@@ -6139,7 +6123,7 @@ module RbReadline
     return temp
   end
 
-  def hist_inittime()
+  def hist_inittime
     t = Time.now.to_i
     ts = "X%u" % t
     ret = ts.dup
@@ -6170,7 +6154,7 @@ module RbReadline
     @the_history[@history_length - 1] = temp
   end
 
-  def using_history()
+  def using_history
     @history_offset = @history_length
   end
 
@@ -6187,7 +6171,7 @@ module RbReadline
     @rl_completion_mark_symlink_dirs = @_rl_complete_mark_symlink_dirs
   end
 
-  def _rl_find_completion_word()
+  def _rl_find_completion_word
     _end = @rl_point
     found_quote = 0
     delimiter = 0.chr
@@ -6939,13 +6923,13 @@ module RbReadline
     return_value
   end
 
-  def block_sigint()
+  def block_sigint
     return if @sigint_blocked
     @sigint_proc = Signal.trap("INT", "IGNORE")
     @sigint_blocked = true
   end
 
-  def release_sigint()
+  def release_sigint
     return if !@sigint_blocked
     Signal.trap("INT", @sigint_proc)
     @sigint_blocked = false
@@ -6961,7 +6945,7 @@ module RbReadline
     end
   end
 
-  def save_tty_chars()
+  def save_tty_chars
     @_rl_last_tty_chars = @_rl_tty_chars
     h = {}
     retry_if_interrupted do
@@ -7096,7 +7080,7 @@ module RbReadline
   end
 
   # Restore the terminal's normal settings and modes.
-  def rl_deprep_terminal()
+  def rl_deprep_terminal
     return if ENV["TERM"].nil?
     return if (!@terminal_prepped)
 
@@ -7134,7 +7118,7 @@ module RbReadline
 
   # Kill from here to the end of the line.  If DIRECTION is negative, kill
   #   back to the line start instead.
-  def rl_kill_line (direction, ignore)
+  def rl_kill_line(direction, ignore)
     if (direction < 0)
       return (rl_backward_kill_line(1, ignore))
     else
@@ -7262,7 +7246,7 @@ module RbReadline
     cxt
   end
 
-  def history_list()
+  def history_list
     @the_history
   end
 
@@ -7322,7 +7306,7 @@ module RbReadline
     cxt
   end
 
-  def rl_save_prompt()
+  def rl_save_prompt
     @saved_local_prompt = @local_prompt
     @saved_local_prefix = @local_prompt_prefix
     @saved_prefix_length = @prompt_prefix_length
@@ -7338,7 +7322,7 @@ module RbReadline
     @prompt_invis_chars_first_line = @prompt_physical_chars = 0
   end
 
-  def rl_restore_prompt()
+  def rl_restore_prompt
     @local_prompt = nil
     @local_prompt_prefix = nil
 
@@ -7658,7 +7642,7 @@ module RbReadline
     ((i) == -1 ? @rl_point : ((i) == -2 ? @rl_end : (i)))
   end
 
-  def rl_do_undo()
+  def rl_do_undo
     start = _end = waiting_for_begin = 0
     begin
       return 0 if @rl_undo_list.nil?
@@ -7778,7 +7762,7 @@ module RbReadline
     0
   end
 
-  def rl_backward_char_search (count, key)
+  def rl_backward_char_search(count, key)
     _rl_char_search(count, BFIND, FFIND)
   end
 
@@ -7786,13 +7770,13 @@ module RbReadline
     rl_complete_internal('*')
   end
 
-  def _rl_arg_init()
+  def _rl_arg_init
     rl_save_prompt()
     @_rl_argcxt = 0
     rl_setstate(RL_STATE_NUMERICARG)
   end
 
-  def _rl_arg_getchar()
+  def _rl_arg_getchar
     rl_message("(arg: #{@rl_arg_sign * @rl_numeric_arg}) ")
     rl_setstate(RL_STATE_MOREINPUT)
     c = rl_read_key()
@@ -7863,7 +7847,7 @@ module RbReadline
     1
   end
 
-  def _rl_arg_overflow()
+  def _rl_arg_overflow
     if (@rl_numeric_arg > 1000000)
       @_rl_argcxt = 0
       @rl_explicit_arg = @rl_numeric_arg = 0
@@ -7877,7 +7861,7 @@ module RbReadline
   end
 
   # Handle C-u style numeric args, as well as M--, and M-digits.
-  def rl_digit_loop()
+  def rl_digit_loop
     while (true)
       return 1 if _rl_arg_overflow()!=0
       c = _rl_arg_getchar()
@@ -8087,7 +8071,7 @@ module RbReadline
   end
 
   # Do an anchored search for string through the history in DIRECTION.
-  def history_search_prefix (string, direction)
+  def history_search_prefix(string, direction)
     history_search_internal(string, direction, ANCHORED_SEARCH)
   end
 
@@ -8535,7 +8519,7 @@ module RbReadline
   # Stop stifling the history.  This returns the previous maximum
   #   number of history entries.  The value is positive if the history
   #   was stifled,  negative if it wasn't.
-  def unstifle_history()
+  def unstifle_history
     if (@history_stifled)
       @history_stifled = false
       return (@history_max_entries)
@@ -8544,11 +8528,11 @@ module RbReadline
     end
   end
 
-  def history_is_stifled()
+  def history_is_stifled
     return (@history_stifled)
   end
 
-  def clear_history()
+  def clear_history
     @the_history = nil
     @history_offset = @history_length = 0
   end
@@ -8850,7 +8834,7 @@ module RbReadline
   end
 
   # Redisplay the current line after a SIGWINCH is received.
-  def _rl_redisplay_after_sigwinch()
+  def _rl_redisplay_after_sigwinch
     # Clear the current line and put the cursor at column 0.  Make sure
     #   the right thing happens if we have wrapped to a new screen line.
     if @_rl_term_cr
@@ -8879,7 +8863,7 @@ module RbReadline
     end
   end
 
-  def rl_resize_terminal()
+  def rl_resize_terminal
     if @readline_echoing_p
       _rl_get_screen_size(@rl_instream.fileno, 1)
       if @rl_redisplay_function != :rl_redisplay
@@ -8897,7 +8881,7 @@ module RbReadline
   end
 
 
-
+=begin
   module_function :rl_attempted_completion_function,:rl_deprep_term_function,
     :rl_event_hook,:rl_attempted_completion_over,:rl_basic_quote_characters,
     :rl_basic_word_break_characters,:rl_completer_quote_characters,
@@ -8910,11 +8894,11 @@ module RbReadline
     :rl_completer_word_break_characters=,:rl_completion_append_character=,
     :rl_filename_quote_characters=,:rl_instream=,:rl_library_version=,:rl_outstream=,
     :rl_readline_name=,:history_length,:history_base,:rl_point
-
+=end
   def no_terminal?
     term = ENV["TERM"]
     term.nil? || (term == 'dumb') || (RUBY_PLATFORM =~ /mswin|mingw/)
   end
   private :no_terminal?
-
+  end # class << self
 end

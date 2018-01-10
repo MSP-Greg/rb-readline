@@ -7,7 +7,9 @@
 
 module Readline
 
-  require 'rbreadline'
+  require_relative 'rbreadline'
+  require_relative 'readline/history'
+
   include RbReadline
 
   @completion_proc = nil
@@ -97,7 +99,7 @@ module Readline
 
   # Returns the current auto-completion procedure.
   #
-  def self.completion_proc()
+  def self.completion_proc
     @completion_proc
   end
 
@@ -111,7 +113,7 @@ module Readline
   # Returns whether or not the completion proc is case sensitive. The
   # default is false, i.e. completion procs are case sensitive.
   #
-  def self.completion_case_fold()
+  def self.completion_case_fold
     @completion_case_fold
   end
 
@@ -184,14 +186,14 @@ module Readline
 
   # Sets vi editing mode.
   #
-  def self.vi_editing_mode()
+  def self.vi_editing_mode
     RbReadline.rl_vi_editing_mode(1,0)
     nil
   end
 
   # Sets emacs editing mode
   #
-  def self.emacs_editing_mode()
+  def self.emacs_editing_mode
     RbReadline.rl_emacs_editing_mode(1,0)
     nil
   end
@@ -214,7 +216,7 @@ module Readline
   # Returns the character that is automatically appended after the
   # Readline.completion_proc method is called.
   #
-  def self.completion_append_character()
+  def self.completion_append_character
     if RbReadline.rl_completion_append_character == ?\0
       return nil
     end
@@ -231,7 +233,7 @@ module Readline
   # Returns the character string that signal a break between words for the
   # completion proc. The default is " \t\n\"\\'`@$><=|&{(".
   #
-  def self.basic_word_break_characters()
+  def self.basic_word_break_characters
     if RbReadline.rl_basic_word_break_characters.nil?
       nil
     else
@@ -249,7 +251,7 @@ module Readline
   # Returns the character string that signal the start or end of a word for
   # the completion proc.
   #
-  def self.completer_word_break_characters()
+  def self.completer_word_break_characters
     if RbReadline.rl_completer_word_break_characters.nil?
       nil
     else
@@ -266,7 +268,7 @@ module Readline
   # Returns the list of quote characters that can cause a word break.
   # The default is "'\"" (single and double quote characters).
   #
-  def self.basic_quote_characters()
+  def self.basic_quote_characters
     if RbReadline.rl_basic_quote_characters.nil?
       nil
     else
@@ -284,7 +286,7 @@ module Readline
   # Returns the list of characters that can be used to quote a substring
   # of the line, i.e. a group of characters inside quotes.
   #
-  def self.completer_quote_characters()
+  def self.completer_quote_characters
     if RbReadline.rl_completer_quote_characters.nil?
       nil
     else
@@ -302,7 +304,7 @@ module Readline
   # Returns the character string used to indicate quotes for the filename
   # completion of user input.
   #
-  def self.filename_quote_characters()
+  def self.filename_quote_characters
     if RbReadline.rl_filename_quote_characters.nil?
       nil
     else
@@ -312,7 +314,7 @@ module Readline
 
   # Returns the current offset in the current input line.
   #
-  def self.point()
+  def self.point
     RbReadline.rl_point
   end
 
@@ -325,147 +327,6 @@ module Readline
     $VERBOSE = warn_level
     result
   end
-
-  # The History class encapsulates a history of all commands entered by
-  # users at the prompt, providing an interface for inspection and retrieval
-  # of all commands.
-  class History
-    extend Enumerable
-
-    # The History class, stringified in all caps.
-    #--
-    # Why?
-    #
-    def self.to_s
-      "HISTORY"
-    end
-
-    # Returns the command that was entered at the specified +index+
-    # in the history buffer.
-    #
-    # Raises an IndexError if the entry is nil.
-    #
-    def self.[](index)
-      if index < 0
-        index += RbReadline.history_length
-      end
-      entry = RbReadline.history_get(RbReadline.history_base+index)
-      if entry.nil?
-        raise IndexError,"invalid index"
-      end
-      entry.line.dup
-    end
-
-    # Sets the command +str+ at the given index in the history buffer.
-    #
-    # You can only replace an existing entry. Attempting to create a new
-    # entry will result in an IndexError.
-    #
-    def self.[]=(index,str)
-      if index<0
-        index += RbReadline.history_length
-      end
-      entry = RbReadline.replace_history_entry(index,str,nil)
-      if entry.nil?
-        raise IndexError,"invalid index"
-      end
-      str
-    end
-
-    # Synonym for Readline.add_history.
-    #
-    def self.<<(str)
-      RbReadline.add_history(str)
-    end
-
-    # Pushes a list of +args+ onto the history buffer.
-    #
-    def self.push(*args)
-      args.each do |str|
-        RbReadline.add_history(str)
-      end
-    end
-
-    # Internal function that removes the item at +index+ from the history
-    # buffer, performing necessary duplication in the process.
-    #--
-    # TODO: mark private?
-    #
-    def self.rb_remove_history(index)
-      entry = RbReadline.remove_history(index)
-      if (entry)
-        val = entry.line.dup
-        entry = nil
-        return val
-      end
-      nil
-    end
-
-    # Removes and returns the last element from the history buffer.
-    #
-    def self.pop()
-      if RbReadline.history_length>0
-        rb_remove_history(RbReadline.history_length-1)
-      else
-        nil
-      end
-    end
-
-    # Removes and returns the first element from the history buffer.
-    #
-    def self.shift()
-      if RbReadline.history_length>0
-        rb_remove_history(0)
-      else
-        nil
-      end
-    end
-
-    # Iterates over each entry in the history buffer.
-    #
-    def self.each()
-      for i in 0 ... RbReadline.history_length
-        entry = RbReadline.history_get(RbReadline.history_base + i)
-        break if entry.nil?
-        yield entry.line.dup
-      end
-      self
-    end
-
-    # Returns the length of the history buffer.
-    #
-    def self.length()
-      RbReadline.history_length
-    end
-
-    # Synonym for Readline.length.
-    #
-    def self.size()
-      RbReadline.history_length
-    end
-
-    # Returns a bolean value indicating whether or not the history buffer
-    # is empty.
-    #
-    def self.empty?()
-      RbReadline.history_length == 0
-    end
-
-    # Deletes an entry from the histoyr buffer at the specified +index+.
-    #
-    def self.delete_at(index)
-      if index < 0
-        i += RbReadline.history_length
-      end
-      if index < 0 || index > RbReadline.history_length - 1
-        raise IndexError, "invalid index"
-      end
-      rb_remove_history(index)
-    end
-
-  end
-
-  silence_warnings { HISTORY = History }
 
   # The Fcomp class provided to encapsulate typical filename completion
   # procedure. You will not typically use this directly, but will instead
@@ -524,11 +385,13 @@ module Readline
     end
   end
 
+  silence_warnings { HISTORY = History }
+
+  RbReadline.using_history()
+
   silence_warnings { USERNAME_COMPLETION_PROC = Ucomp }
 
   RbReadline.rl_readline_name = "Ruby"
-
-  RbReadline.using_history()
 
   silence_warnings { VERSION = RbReadline.rl_library_version }
 
